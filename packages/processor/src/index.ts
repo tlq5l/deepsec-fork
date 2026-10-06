@@ -546,7 +546,9 @@ export async function process(params: {
           (current.status === "processing" &&
             current.lockedByRunId !== runId &&
             isReclaimableLock(current));
-        if (!isOurs && !isFreelyClaimable && !inForceMode) {
+        // Force mode re-claims analyzed files. A file under another run's
+        // non-reclaimable lock stays with that run.
+        if (!isOurs && !isFreelyClaimable && (!inForceMode || current.status === "processing")) {
           continue;
         }
 
