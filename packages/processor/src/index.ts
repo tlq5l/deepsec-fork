@@ -391,17 +391,6 @@ export async function process(params: {
       return ageMs >= STALE_LOCK_MS;
     };
 
-    // True when a lock held by another run can be checked (it started on
-    // this host) and isn't reclaimable. Force mode leaves those files alone.
-    const isLiveLocalLock = (r: FileRecord): boolean => {
-      if (isReclaimableLock(r)) return false;
-      try {
-        return readRunMeta(projectId, r.lockedByRunId!).hostname === localHostname;
-      } catch {
-        return false;
-      }
-    };
-
     // Load file records and pick which to process
     const allRecords = loadAllFileRecords(projectId);
     let toProcess: FileRecord[];
@@ -537,6 +526,7 @@ export async function process(params: {
     // primitive and the 1h stale-lock cutoff.
     const lockedAt = new Date().toISOString();
     const claimed: FileRecord[] = [];
+    const lockedPaths: string[] = [];
     const inForceMode = !!reinvestigate || params.filePaths !== undefined;
     const releaseProcessLock = await acquireProcessLock(projectId, runId);
     try {
@@ -557,11 +547,11 @@ export async function process(params: {
           (current.status === "processing" &&
             current.lockedByRunId !== runId &&
             isReclaimableLock(current));
-        // Force mode re-claims analyzed files and files locked by a run on
-        // another host, whose PID we can't probe. It leaves a file alone
-        // only while a run on this host holds a live lock on it, whatever
-        // the record's status.
-        if (!isOurs && !isFreelyClaimable && (!inForceMode || isLiveLocalLock(current))) {
+        // Force mode also re-claims analyzed files, so it can't rely on the
+        // status. It leaves a file alone only while another run's lock isn't
+        // reclaimable, whichever host that run is on.
+        if (!isOurs && !isFreelyClaimable && !(inForceMode && isReclaimableLock(current))) {
+          lockedPaths.push(current.filePath);
           continue;
         }
 
@@ -577,6 +567,11 @@ export async function process(params: {
       }
     } finally {
       releaseProcessLock();
+    }
+    if (params.filePaths !== undefined && lockedPaths.length > 0) {
+      console.warn(
+        `[deepsec] process: ${lockedPaths.length} file(s) were locked by another run and were skipped: ${lockedPaths.slice(0, 5).join(", ")}${lockedPaths.length > 5 ? "…" : ""}`,
+      );
     }
     toProcess = claimed;
     if (toProcess.length === 0) {

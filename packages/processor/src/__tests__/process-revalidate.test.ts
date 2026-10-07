@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { defineConfig, type FileRecord, setLoadedConfig } from "@deepsec/core";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { QuotaExhaustedError } from "../agents/shared.js";
 import { process as processProject, revalidate } from "../index.js";
 import { StubAgent } from "./stub-agent.js";
@@ -521,24 +521,42 @@ describe("processor with stub agent", () => {
   });
 
   it.each([
+    ["leaves a fresh lock from another host", "processing", "other-host", "running", 0, false],
     [
-      "takes a processing file locked from another host",
+      "takes a lock from another host older than 1 hour",
       "processing",
       "other-host",
-      "remote.ts",
+      "running",
+      61 * 60_000,
       true,
     ],
-    ["leaves an analyzed file locked on this host", "analyzed", os.hostname(), "kept.ts", false],
-  ] as const)("process() with --reinvestigate %s", async (_name, status, hostname, filePath, taken) => {
-    // A lock from another host can't be PID-probed, so it is taken as
-    // before (sandbox re-runs). A live same-host lock holds whatever the status.
+    [
+      "takes a lock from another host whose run is done",
+      "processing",
+      "other-host",
+      "done",
+      0,
+      true,
+    ],
+    [
+      "leaves an analyzed file with a live lock on this host",
+      "analyzed",
+      os.hostname(),
+      "running",
+      0,
+      false,
+    ],
+  ] as const)("process() with --reinvestigate %s", async (_name, status, hostname, phase, ageMs, taken) => {
+    // Force mode skips a file exactly when its lock isn't reclaimable,
+    // whatever the host and whatever the record's status.
+    const filePath = "locked.ts";
     const fx = setupProject({ files: [filePath] });
     const liveRunId = "20260101000000-liveremoteaaaaaa";
     fs.mkdirSync(path.join(fx.dataRoot, fx.projectId, "runs"), { recursive: true });
     const rec = pendingRecord(fx.projectId, filePath);
     rec.status = status;
     rec.lockedByRunId = liveRunId;
-    rec.lockedAt = new Date().toISOString();
+    rec.lockedAt = new Date(Date.now() - ageMs).toISOString();
     fx.writeRecord(rec);
     fs.writeFileSync(
       path.join(fx.dataRoot, fx.projectId, "runs", `${liveRunId}.json`),
@@ -548,7 +566,7 @@ describe("processor with stub agent", () => {
         rootPath: fx.targetRoot,
         createdAt: new Date().toISOString(),
         type: "process",
-        phase: "running",
+        phase,
         pid: process.pid,
         hostname,
         stats: {},
@@ -573,6 +591,56 @@ describe("processor with stub agent", () => {
     const investigated = stub.calls.investigateCalls.flatMap((c) => c.batch.map((r) => r.filePath));
     expect(investigated).toEqual(taken ? [filePath] : []);
     if (!taken) expect(fx.readRecord(filePath)).toEqual(before);
+  });
+
+  it("process() with a file list warns about requested files another run holds", async () => {
+    const fx = setupProject({ files: ["held.ts", "free.ts"] });
+    const otherRunId = "20260101000000-otherwarnaaaaaaa";
+    fs.mkdirSync(path.join(fx.dataRoot, fx.projectId, "runs"), { recursive: true });
+    const held = pendingRecord(fx.projectId, "held.ts");
+    held.status = "processing";
+    held.lockedByRunId = otherRunId;
+    held.lockedAt = new Date().toISOString();
+    fx.writeRecord(held);
+    fx.writeRecord(pendingRecord(fx.projectId, "free.ts"));
+    fs.writeFileSync(
+      path.join(fx.dataRoot, fx.projectId, "runs", `${otherRunId}.json`),
+      JSON.stringify({
+        runId: otherRunId,
+        projectId: fx.projectId,
+        rootPath: fx.targetRoot,
+        createdAt: new Date().toISOString(),
+        type: "process",
+        phase: "running",
+        pid: process.pid,
+        hostname: "other-host",
+        stats: {},
+      }),
+    );
+
+    const stub = new StubAgent();
+    setLoadedConfig(
+      defineConfig({
+        projects: [{ id: fx.projectId, root: fx.targetRoot }],
+        plugins: [{ name: "stub", agents: [stub] }],
+      }),
+    );
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await processProject({
+        projectId: fx.projectId,
+        agentType: "stub",
+        concurrency: 1,
+        filePaths: ["held.ts", "free.ts"],
+      });
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0][0]).toContain("held.ts");
+      expect(warn.mock.calls[0][0]).not.toContain("free.ts");
+    } finally {
+      warn.mockRestore();
+    }
+    const investigated = stub.calls.investigateCalls.flatMap((c) => c.batch.map((r) => r.filePath));
+    expect(investigated).toEqual(["free.ts"]);
   });
 
   it("process() captures refusals from the agent into AnalysisEntry", async () => {
