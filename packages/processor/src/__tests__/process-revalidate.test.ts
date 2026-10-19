@@ -622,6 +622,74 @@ describe("processor with stub agent", () => {
     expect(investigated).toEqual(["free.ts"]);
   });
 
+  it("process() with --reinvestigate keeps findings another run wrote after the snapshot loaded", async () => {
+    // The other run's lock is live when the records are loaded, so the
+    // snapshot has no findings. The run finishes the file before the claim,
+    // which clears the lock and makes the file claimable.
+    const filePath = "shared.ts";
+    const fx = setupProject({ files: [filePath] });
+    const otherRunId = "20260101000000-othersnapaaaaaaa";
+    const rec = pendingRecord(fx.projectId, filePath);
+    rec.status = "processing";
+    rec.lockedByRunId = otherRunId;
+    rec.lockedAt = new Date().toISOString();
+    fx.writeRecord(rec);
+    writeRun(fx, otherRunId, { hostname: os.hostname(), phase: "running", pid: process.pid });
+
+    const stub = new StubAgent();
+    setLoadedConfig(
+      defineConfig({
+        projects: [{ id: fx.projectId, root: fx.targetRoot }],
+        plugins: [{ name: "stub", agents: [stub] }],
+      }),
+    );
+
+    // Hold the claim mutex so process() loads its snapshot, then waits.
+    const lockDir = path.join(fx.dataRoot, fx.projectId, ".process.lock");
+    fs.mkdirSync(lockDir);
+    const run = processProject({
+      projectId: fx.projectId,
+      agentType: "stub",
+      concurrency: 1,
+      reinvestigate: true,
+    });
+
+    const finished = fx.readRecord(filePath);
+    finished.status = "analyzed";
+    finished.lockedByRunId = undefined;
+    finished.lockedAt = undefined;
+    finished.findings = [
+      {
+        severity: "HIGH",
+        vulnSlug: "auth-bypass",
+        title: "finding from the other run",
+        description: "written after the snapshot loaded",
+        lineNumbers: [1],
+        recommendation: "fix it",
+        confidence: "high",
+      },
+    ];
+    finished.analysisHistory = [
+      {
+        runId: otherRunId,
+        investigatedAt: new Date().toISOString(),
+        durationMs: 1,
+        agentType: "stub",
+        model: "stub",
+        modelConfig: {},
+        findingCount: 1,
+      },
+    ];
+    fx.writeRecord(finished);
+    fs.rmSync(lockDir, { recursive: true });
+    await run;
+
+    const after = fx.readRecord(filePath);
+    expect(after.findings.map((f) => f.title)).toContain("finding from the other run");
+    expect(after.analysisHistory.map((h) => h.runId)).toContain(otherRunId);
+    expect(after.analysisHistory).toHaveLength(2);
+  });
+
   it("process() captures refusals from the agent into AnalysisEntry", async () => {
     const fx = setupProject({ files: ["app.ts"] });
     fx.writeRecord(pendingRecord(fx.projectId, "app.ts"));
