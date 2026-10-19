@@ -76,6 +76,27 @@ function pendingRecord(projectId: string, filePath: string): FileRecord {
   };
 }
 
+function writeRun(
+  fx: Fixture,
+  runId: string,
+  meta: { hostname: string; phase: "running" | "done"; pid: number },
+): void {
+  const runsDir = path.join(fx.dataRoot, fx.projectId, "runs");
+  fs.mkdirSync(runsDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(runsDir, `${runId}.json`),
+    JSON.stringify({
+      runId,
+      projectId: fx.projectId,
+      rootPath: fx.targetRoot,
+      createdAt: new Date().toISOString(),
+      type: "process",
+      stats: {},
+      ...meta,
+    }),
+  );
+}
+
 describe("processor with stub agent", () => {
   let prevDataRoot: string | undefined;
 
@@ -469,27 +490,13 @@ describe("processor with stub agent", () => {
     const deadRunId = "20260101000000-deadforceaaaaaaa";
     const ownRunId = "20260101000000-ownforceaaaaaaaa";
 
-    fs.mkdirSync(path.join(fx.dataRoot, fx.projectId, "runs"), { recursive: true });
     const lock = (filePath: string, runId: string, pid: number) => {
       const rec = pendingRecord(fx.projectId, filePath);
       rec.status = "processing";
       rec.lockedByRunId = runId;
       rec.lockedAt = new Date().toISOString();
       fx.writeRecord(rec);
-      fs.writeFileSync(
-        path.join(fx.dataRoot, fx.projectId, "runs", `${runId}.json`),
-        JSON.stringify({
-          runId,
-          projectId: fx.projectId,
-          rootPath: fx.targetRoot,
-          createdAt: new Date().toISOString(),
-          type: "process",
-          phase: "running",
-          pid,
-          hostname: os.hostname(),
-          stats: {},
-        }),
-      );
+      writeRun(fx, runId, { hostname: os.hostname(), phase: "running", pid });
     };
     lock("live.ts", liveRunId, process.pid);
     const liveBefore = fx.readRecord("live.ts");
@@ -552,26 +559,12 @@ describe("processor with stub agent", () => {
     const filePath = "locked.ts";
     const fx = setupProject({ files: [filePath] });
     const liveRunId = "20260101000000-liveremoteaaaaaa";
-    fs.mkdirSync(path.join(fx.dataRoot, fx.projectId, "runs"), { recursive: true });
     const rec = pendingRecord(fx.projectId, filePath);
     rec.status = status;
     rec.lockedByRunId = liveRunId;
     rec.lockedAt = new Date(Date.now() - ageMs).toISOString();
     fx.writeRecord(rec);
-    fs.writeFileSync(
-      path.join(fx.dataRoot, fx.projectId, "runs", `${liveRunId}.json`),
-      JSON.stringify({
-        runId: liveRunId,
-        projectId: fx.projectId,
-        rootPath: fx.targetRoot,
-        createdAt: new Date().toISOString(),
-        type: "process",
-        phase,
-        pid: process.pid,
-        hostname,
-        stats: {},
-      }),
-    );
+    writeRun(fx, liveRunId, { hostname, phase, pid: process.pid });
     const before = fx.readRecord(filePath);
 
     const stub = new StubAgent();
@@ -596,27 +589,13 @@ describe("processor with stub agent", () => {
   it("process() with a file list warns about requested files another run holds", async () => {
     const fx = setupProject({ files: ["held.ts", "free.ts"] });
     const otherRunId = "20260101000000-otherwarnaaaaaaa";
-    fs.mkdirSync(path.join(fx.dataRoot, fx.projectId, "runs"), { recursive: true });
     const held = pendingRecord(fx.projectId, "held.ts");
     held.status = "processing";
     held.lockedByRunId = otherRunId;
     held.lockedAt = new Date().toISOString();
     fx.writeRecord(held);
     fx.writeRecord(pendingRecord(fx.projectId, "free.ts"));
-    fs.writeFileSync(
-      path.join(fx.dataRoot, fx.projectId, "runs", `${otherRunId}.json`),
-      JSON.stringify({
-        runId: otherRunId,
-        projectId: fx.projectId,
-        rootPath: fx.targetRoot,
-        createdAt: new Date().toISOString(),
-        type: "process",
-        phase: "running",
-        pid: process.pid,
-        hostname: "other-host",
-        stats: {},
-      }),
-    );
+    writeRun(fx, otherRunId, { hostname: "other-host", phase: "running", pid: process.pid });
 
     const stub = new StubAgent();
     setLoadedConfig(
