@@ -510,11 +510,6 @@ export async function process(params: {
       toProcess = toProcess.filter((r) => r.filePath.startsWith(params.filter!));
     }
 
-    // Apply limit
-    if (params.limit && toProcess.length > params.limit) {
-      toProcess = toProcess.slice(0, params.limit);
-    }
-
     // Atomic claim under a per-project mutex. Without serializing this
     // section, two `process()` invocations against the same project both
     // see the same pending records, both write status="processing" with
@@ -531,6 +526,8 @@ export async function process(params: {
     const releaseProcessLock = await acquireProcessLock(projectId, runId);
     try {
       for (const record of toProcess) {
+        // The limit counts claimed files, so locked ones don't use up slots.
+        if (params.limit && claimed.length >= params.limit) break;
         let current: FileRecord;
         try {
           const fresh = readFileRecord(projectId, record.filePath);
@@ -568,7 +565,7 @@ export async function process(params: {
     } finally {
       releaseProcessLock();
     }
-    if (params.filePaths !== undefined && lockedPaths.length > 0) {
+    if (lockedPaths.length > 0) {
       console.warn(
         `[deepsec] process: ${lockedPaths.length} file(s) were locked by another run and were skipped: ${lockedPaths.slice(0, 5).join(", ")}${lockedPaths.length > 5 ? "…" : ""}`,
       );
