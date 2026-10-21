@@ -676,6 +676,43 @@ describe("processor with stub agent", () => {
     expect(investigated).toEqual(["free.ts"]);
   });
 
+  it("process() in default mode warns about a processing file another run holds", async () => {
+    const fx = setupProject({ files: ["held.ts", "free.ts"] });
+    const otherRunId = "20260101000000-otherdefaultaaaa";
+    const held = pendingRecord(fx.projectId, "held.ts");
+    held.status = "processing";
+    held.lockedByRunId = otherRunId;
+    held.lockedAt = new Date().toISOString();
+    fx.writeRecord(held);
+    fx.writeRecord(pendingRecord(fx.projectId, "free.ts"));
+    writeRun(fx, otherRunId, { hostname: "other-host", phase: "running", pid: process.pid });
+    const before = fx.readRecord("held.ts");
+
+    const stub = new StubAgent();
+    setLoadedConfig(
+      defineConfig({
+        projects: [{ id: fx.projectId, root: fx.targetRoot }],
+        plugins: [{ name: "stub", agents: [stub] }],
+      }),
+    );
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const result = await processProject({
+        projectId: fx.projectId,
+        agentType: "stub",
+        concurrency: 1,
+      });
+      expect(result.skippedCount).toBe(1);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0][0]).toContain("held.ts");
+    } finally {
+      warn.mockRestore();
+    }
+    const investigated = stub.calls.investigateCalls.flatMap((c) => c.batch.map((r) => r.filePath));
+    expect(investigated).toEqual(["free.ts"]);
+    expect(fx.readRecord("held.ts")).toEqual(before);
+  });
+
   it("process() with --reinvestigate keeps findings another run wrote after the snapshot loaded", async () => {
     // The other run's lock is live when the records are loaded, so the
     // snapshot has no findings. The run finishes the file before the claim,

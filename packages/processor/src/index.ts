@@ -455,12 +455,10 @@ export async function process(params: {
         (r) =>
           r.status === "pending" ||
           r.status === "error" ||
-          // Reclaim a `processing` record from another run only when the
-          // owning lock is genuinely abandoned. The previous version
-          // reclaimed unconditionally, which let two concurrent runs
-          // both pick up the same file and clobber each other on
-          // write. See `isReclaimableLock` for the exact criteria.
-          (r.status === "processing" && r.lockedByRunId !== runId && isReclaimableLock(r)),
+          // Another run's `processing` record goes on to the claim step,
+          // which takes it only if the lock is reclaimable and otherwise
+          // reports it as skipped. Dropping it here would hide it.
+          (r.status === "processing" && r.lockedByRunId !== runId),
       );
     }
 
