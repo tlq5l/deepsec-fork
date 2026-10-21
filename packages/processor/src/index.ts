@@ -165,6 +165,12 @@ export async function process(params: {
    */
   errorBatchCount: number;
   /**
+   * Files left unclaimed because another run held a live lock on them. A
+   * run that requested files but claimed none is not a clean review, so
+   * direct mode (the CI gate) fails on a non-zero count.
+   */
+  skippedCount: number;
+  /**
    * Set when one of the batches threw `QuotaExhaustedError`. Once any
    * batch hits this, every subsequent API call against the same credential
    * will fail the same way, so the processor aborts in-flight batches and
@@ -293,7 +299,7 @@ export async function process(params: {
         type: "all_complete",
         message: `Run ${runId} already completed`,
       });
-      return { runId, analysisCount: 0, findingCount: 0, errorBatchCount: 0 };
+      return { runId, analysisCount: 0, findingCount: 0, errorBatchCount: 0, skippedCount: 0 };
     }
   } else {
     // Create new run
@@ -354,6 +360,7 @@ export async function process(params: {
     // thinking. False reclaims are catastrophic; false rejections only
     // cost a retry on the next run.
     const STALE_LOCK_MS = 60 * 60 * 1000;
+    const FUTURE_SKEW_MS = 5 * 60 * 1000;
     const localHostname = os.hostname();
     const isReclaimableLock = (r: FileRecord): boolean => {
       if (!r.lockedByRunId) return true;
@@ -387,8 +394,11 @@ export async function process(params: {
       // those as old enough to reclaim so we can recover legacy locked
       // state.
       if (!r.lockedAt) return true;
-      const ageMs = Date.now() - new Date(r.lockedAt).getTime();
-      return ageMs >= STALE_LOCK_MS;
+      // An unparseable or future timestamp would never age out, so it
+      // can't hold a lock. FUTURE_SKEW_MS allows for clock drift between hosts.
+      const lockedMs = Date.parse(r.lockedAt);
+      if (Number.isNaN(lockedMs) || lockedMs > Date.now() + FUTURE_SKEW_MS) return true;
+      return Date.now() - lockedMs >= STALE_LOCK_MS;
     };
 
     // Load file records and pick which to process
@@ -502,7 +512,7 @@ export async function process(params: {
         message: "No files to process",
       });
       completeRun(projectId, runId, "done", { filesProcessed: 0 });
-      return { runId, analysisCount: 0, findingCount: 0, errorBatchCount: 0 };
+      return { runId, analysisCount: 0, findingCount: 0, errorBatchCount: 0, skippedCount: 0 };
     }
 
     // Apply path filter
@@ -538,16 +548,17 @@ export async function process(params: {
         }
 
         const isOurs = current.lockedByRunId === runId;
-        const isFreelyClaimable =
+        // Another run's lock decides first, whatever the status says: a fresh
+        // lock on a `pending` or `error` record is still that run's file.
+        // Otherwise a pending/error/processing record is free to take, and
+        // force mode also takes analyzed ones.
+        const heldByOther = !isOurs && !isReclaimableLock(current);
+        const isClaimable =
+          inForceMode ||
           current.status === "pending" ||
           current.status === "error" ||
-          (current.status === "processing" &&
-            current.lockedByRunId !== runId &&
-            isReclaimableLock(current));
-        // Force mode also re-claims analyzed files, so it can't rely on the
-        // status. It leaves a file alone only while another run's lock isn't
-        // reclaimable, whichever host that run is on.
-        if (!isOurs && !isFreelyClaimable && !(inForceMode && isReclaimableLock(current))) {
+          current.status === "processing";
+        if (!isOurs && (heldByOther || !isClaimable)) {
           lockedPaths.push(current.filePath);
           continue;
         }
@@ -577,7 +588,13 @@ export async function process(params: {
         message: "Nothing to claim — another run owned every candidate file.",
       });
       completeRun(projectId, runId, "done", { filesProcessed: 0 });
-      return { runId, analysisCount: 0, findingCount: 0, errorBatchCount: 0 };
+      return {
+        runId,
+        analysisCount: 0,
+        findingCount: 0,
+        errorBatchCount: 0,
+        skippedCount: lockedPaths.length,
+      };
     }
 
     const batches = batchCandidates(toProcess, params.batchSize);
@@ -856,6 +873,7 @@ export async function process(params: {
       analysisCount: totalAnalyses,
       findingCount: totalFindings,
       errorBatchCount: batchesFailed,
+      skippedCount: lockedPaths.length,
       quotaExhausted,
       totalCostUsd,
       costLimitReached,

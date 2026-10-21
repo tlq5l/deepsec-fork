@@ -388,6 +388,15 @@ async function processDirectMode(opts: Parameters<typeof processCommand>[0]) {
     console.log(`${RED}${result.findingCount} new finding(s) — exiting 1${RESET}`);
     process.exit(1);
   }
+  // Files another run holds are unreviewed, not clean. A forged or stale
+  // lock must not turn the CI gate green, so fail rather than pass quietly.
+  if (result.skippedCount > 0) {
+    console.log();
+    console.log(
+      `${RED}${result.skippedCount} file(s) skipped because another run holds their lock — exiting 1 (not a clean review).${RESET}`,
+    );
+    process.exit(1);
+  }
   console.log();
   console.log(`${GREEN}No findings.${RESET}`);
 }

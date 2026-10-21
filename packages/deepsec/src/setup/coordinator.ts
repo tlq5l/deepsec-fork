@@ -868,6 +868,7 @@ export async function runSetupWorkflow(
         analysisCount: 0,
         findingCount: 0,
         errorBatchCount: 0,
+        skippedCount: 0,
       };
       reporter.emit({
         type: "phase-skip",

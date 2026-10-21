@@ -546,6 +546,30 @@ describe("processor with stub agent", () => {
       true,
     ],
     [
+      "leaves a pending file with a fresh lock from another host",
+      "pending",
+      "other-host",
+      "running",
+      0,
+      false,
+    ],
+    [
+      "leaves an errored file with a fresh lock from another host",
+      "error",
+      "other-host",
+      "running",
+      0,
+      false,
+    ],
+    [
+      "takes a lock from another host dated a day in the future",
+      "processing",
+      "other-host",
+      "running",
+      -24 * 60 * 60_000,
+      true,
+    ],
+    [
       "leaves an analyzed file with a live lock on this host",
       "analyzed",
       os.hostname(),
@@ -574,7 +598,7 @@ describe("processor with stub agent", () => {
         plugins: [{ name: "stub", agents: [stub] }],
       }),
     );
-    await processProject({
+    const result = await processProject({
       projectId: fx.projectId,
       agentType: "stub",
       concurrency: 1,
@@ -583,7 +607,36 @@ describe("processor with stub agent", () => {
 
     const investigated = stub.calls.investigateCalls.flatMap((c) => c.batch.map((r) => r.filePath));
     expect(investigated).toEqual(taken ? [filePath] : []);
+    expect(result.skippedCount).toBe(taken ? 0 : 1);
     if (!taken) expect(fx.readRecord(filePath)).toEqual(before);
+  });
+
+  it("process() with --reinvestigate takes a lock whose timestamp is unparseable", async () => {
+    const fx = setupProject({ files: ["locked.ts"] });
+    const liveRunId = "20260101000000-badstampaaaaaaaa";
+    const rec = pendingRecord(fx.projectId, "locked.ts");
+    rec.status = "processing";
+    rec.lockedByRunId = liveRunId;
+    rec.lockedAt = "not-a-date";
+    fx.writeRecord(rec);
+    writeRun(fx, liveRunId, { hostname: "other-host", phase: "running", pid: process.pid });
+
+    const stub = new StubAgent();
+    setLoadedConfig(
+      defineConfig({
+        projects: [{ id: fx.projectId, root: fx.targetRoot }],
+        plugins: [{ name: "stub", agents: [stub] }],
+      }),
+    );
+    await processProject({
+      projectId: fx.projectId,
+      agentType: "stub",
+      concurrency: 1,
+      reinvestigate: true,
+    });
+
+    const investigated = stub.calls.investigateCalls.flatMap((c) => c.batch.map((r) => r.filePath));
+    expect(investigated).toEqual(["locked.ts"]);
   });
 
   it("process() with a file list warns about requested files another run holds", async () => {
@@ -606,12 +659,13 @@ describe("processor with stub agent", () => {
     );
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
-      await processProject({
+      const result = await processProject({
         projectId: fx.projectId,
         agentType: "stub",
         concurrency: 1,
         filePaths: ["held.ts", "free.ts"],
       });
+      expect(result.skippedCount).toBe(1);
       expect(warn).toHaveBeenCalledTimes(1);
       expect(warn.mock.calls[0][0]).toContain("held.ts");
       expect(warn.mock.calls[0][0]).not.toContain("free.ts");

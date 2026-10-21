@@ -155,6 +155,7 @@ describe("one-shot setup coordinator", () => {
       analysisCount: 1,
       findingCount: 0,
       errorBatchCount: 0,
+      skippedCount: 0,
     }));
     let fingerprint = "source-v1";
     const services = {
